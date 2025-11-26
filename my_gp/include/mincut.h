@@ -20,9 +20,10 @@
 #include "math_utils.h"
 
 
-#define BLOCK_SIZE 5000000
+#define BLOCK_SIZE 5000000  // 块大小常量，用于批处理
 
 
+// 计时器结构体，用于测量执行时间
 struct my_timer {
     std::chrono::time_point<std::chrono::high_resolution_clock> begin_time_;
     std::chrono::time_point<std::chrono::high_resolution_clock> end_time_;
@@ -31,10 +32,12 @@ struct my_timer {
         begin_time_ = std::chrono::high_resolution_clock::now();
     }
 
+    // 重置计时器
     void reset() {
         begin_time_ = std::chrono::high_resolution_clock::now();
     }
 
+    // 输出时间间隔（秒）
     void timing( const std::string &message) {
         end_time_ = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::seconds>( end_time_ - begin_time_);
@@ -43,25 +46,29 @@ struct my_timer {
 };
 
 
+// 边结构体，表示图中的一条带权边
 struct edge {
-    unsigned u_;
-    unsigned v_;
-    float w_;
+    unsigned u_;  // 起点
+    unsigned v_;  // 终点
+    float w_;     // 权重
 
     edge() : u_(0), v_(0), w_(0.0f) {}
     edge( unsigned u, unsigned v, float w) :
           u_(u), v_(v), w_(w) {}
 
+    // 按权重降序排列（权重大的边优先）
     bool operator < ( const edge &other) {
         return w_ > other.w_;
     }
 };
 
 
+// 聚类类，用于处理图分区中的每个簇
 class cluster {
 
 public:
 
+    // 构造函数：根据点集初始化簇
     cluster( std::vector<unsigned> &points, unsigned *id_in_cluster) {
         size_ = points.size();
         ori_ids_.resize( size_);
@@ -69,11 +76,12 @@ public:
         undir_weight_.resize( size_);
         #pragma omp parallel for
         for( unsigned i = 0; i < size_; i++) {
-            ori_ids_[i] = points[i];
-            id_in_cluster[points[i]] = i;
+            ori_ids_[i] = points[i];               // 保存原始ID
+            id_in_cluster[points[i]] = i;          // 记录点在簇中的局部ID
         }
     }
 
+    // 从原始有向图中提取属于同一簇的边，构建簇内的有向图
     void get_direct_graph( std::vector<std::vector<unsigned>> &ori_graph,
                            std::vector<std::vector<float>> &ori_weight,
                            uint32_t *labels, unsigned *id_in_cluster) {
@@ -83,6 +91,7 @@ public:
             unsigned degree = ori_graph[ori_id].size();
             for( unsigned j = 0; j < degree; j++) {
                 unsigned nbr = ori_graph[ori_id][j];
+                // 只保留同一簇内的边
                 if( labels[nbr] != labels[ori_id]) {
                     continue;
                 }
@@ -93,8 +102,10 @@ public:
         }
     }
 
+    // 将有向图转换为无向图（双向边权重相加）
     void trans2undirect() {
 
+        // 构建反向边的临时图
         std::vector<std::vector<unsigned>> in_graph( size_);
         std::vector<std::vector<float>> in_weight( size_);
         std::vector<std::mutex> mtxs( size_);
@@ -104,11 +115,12 @@ public:
             for( unsigned j = 0; j < degree; j++) {
                 unsigned nbr = undir_graph_[i][j];
                 std::lock_guard<std::mutex> lock( mtxs[nbr]);
-                in_graph[nbr].push_back( i);
+                in_graph[nbr].push_back( i);           // 添加反向边
                 in_weight[nbr].push_back( undir_weight_[i][j]);
             }
         }
 
+        // 合并正向边和反向边，形成无向图
         #pragma omp parallel for
         for( unsigned i = 0; i < size_; i++) {
             unsigned degree = in_graph[i].size();
@@ -120,13 +132,16 @@ public:
                 unsigned nbr = in_graph[i][j];
                 auto iter = std::find(undir_graph_[i].begin(), undir_graph_[i].end(), nbr);
                 if( iter == undir_graph_[i].end()) {
+                    // 如果反向边不存在于正向边中，添加该邻居
                     append_nbrs.push_back( nbr);
                     append_weights.push_back( in_weight[i][j]);
                 }
                 else {
+                    // 如果双向边都存在，权重相加
                     undir_weight_[i][iter-undir_graph_[i].begin()] += in_weight[i][j];
                 }
             }
+            // 将新发现的邻居添加到邻接表中
             undir_graph_[i].insert( undir_graph_[i].end(), 
                                     std::make_move_iterator( append_nbrs.begin()),
                                     std::make_move_iterator( append_nbrs.end()));
@@ -137,6 +152,7 @@ public:
     }
 
 
+    // 将节点的邻居添加到候选集合中（用于贪心布局算法）
     void push_nbrs( unsigned id, std::vector<bool> &vis,
                     std::unordered_map<unsigned, float> &map) {
         unsigned degree = undir_graph_[id].size();
@@ -147,14 +163,15 @@ public:
             }
             auto iter = map.find( nbr);
             if( iter == map.end()) {
-                map[nbr] = undir_weight_[id][j];
+                map[nbr] = undir_weight_[id][j];      // 新邻居，记录权重
             }
             else {
-                iter->second += undir_weight_[id][j];
+                iter->second += undir_weight_[id][j];  // 已存在，累加权重
             }
         }
     }
 
+    // 从候选集合中选择收益最大的下一个节点
     bool find_next( unsigned &id, std::unordered_map<unsigned, float> &map) {
         if( map.empty()) {
             return false;
@@ -163,7 +180,7 @@ public:
         for( auto &pair : map) {
             if( benefit < pair.second) {
                 id = pair.first;
-                benefit = pair.second;
+                benefit = pair.second;  // 选择权重和最大的节点
             }
         }
         map.erase( id);
@@ -171,41 +188,51 @@ public:
     }
 
 
+    // 贪心布局算法：将节点分配到页面中，使同一页面内的边权重和最大化
     void greedy_layout( unsigned page_capacity, bool post=false) {
+        // 计算需要的页面数量
         unsigned num_pages = size_ / page_capacity + (size_ % page_capacity != 0);
-        id2p_.resize( size_);
-        p2id_.resize( num_pages);
+        id2p_.resize( size_);          // 节点到页面的映射
+        p2id_.resize( num_pages);      // 页面到节点集合的映射
         for( auto &page : p2id_) {
             page.reserve( page_capacity);
         }
+        
+        // 统计边数并收集所有边
         unsigned num_edge = 0;
         for( unsigned i = 0; i < size_; i++) {
             num_edge += undir_graph_[i].size();
         }
-        num_edge /= 2;
+        num_edge /= 2;  // 无向图，每条边计算了两次
+        
         std::vector<edge> all_edges;
         all_edges.reserve( num_edge);
         for( unsigned i = 0; i < size_; i++) {
             unsigned degree = undir_graph_[i].size();
             for( unsigned j = 0; j < degree; j++) {
                 unsigned nbr = undir_graph_[i][j];
-                if( nbr < i) {
+                if( nbr < i) {  // 避免重复添加同一条边
                     continue;
                 }
                 all_edges.emplace_back( i, nbr, undir_weight_[i][j]);
             }
         }
+        // 按边权重降序排序（优先处理权重大的边）
         std::sort( all_edges.begin(), all_edges.end());
 
-        std::vector<bool> vis( size_, false);
+        std::vector<bool> vis( size_, false);  // 标记节点是否已分配
         unsigned page_id = 0;
-        unsigned cur_capacity = page_capacity;
+        unsigned cur_capacity = page_capacity;  // 当前页面剩余容量
         unsigned unfull_cnt = 0;
         unsigned added_cnt = 0;
+        
+        // 贪心算法：优先将权重大的边的两个端点放在同一页面
         for( unsigned edge_id = 0; page_id < num_pages && edge_id < num_edge;) {
             edge cur_edge = all_edges[edge_id];
             unsigned u = cur_edge.u_;
             unsigned v = cur_edge.v_;
+            
+            // 如果当前页面是空的，尝试添加一条边的两个端点
             if( cur_capacity == page_capacity) {
                 if( vis[u] || vis[v]) {
                     edge_id++;
@@ -221,35 +248,42 @@ public:
                 added_cnt += 2;
                 continue;
             }
+            
+            // 当前页面已满，移到下一个页面
             if( cur_capacity == 0) {
                 cur_capacity = page_capacity;
                 page_id++;
                 continue;
             }
 
+            // 贪心扩展当前页面：选择与当前页面节点连接权重最大的节点
             std::unordered_map<unsigned, float> id2benefit;
             for( unsigned &id : p2id_[page_id]) {
-                push_nbrs( id, vis, id2benefit);
+                push_nbrs( id, vis, id2benefit);  // 收集候选节点及其收益
             }
+            
+            // 持续添加收益最大的节点，直到页面满或无可添加节点
             while( cur_capacity > 0) {
                 unsigned target_id;
                 if( !find_next( target_id, id2benefit)) {
-                    break;
+                    break;  // 没有更多候选节点
                 }
                 id2p_[target_id] = page_id;
                 p2id_[page_id].push_back(target_id);
                 vis[target_id] = true;
                 cur_capacity--;
                 added_cnt++;
-                push_nbrs( target_id, vis, id2benefit);
+                push_nbrs( target_id, vis, id2benefit);  // 添加新节点的邻居
             }
+            
             if( cur_capacity > 0) {
-                unfull_cnt++;
+                unfull_cnt++;  // 页面未满
             }
             page_id++;
             cur_capacity = page_capacity;
         }
-        // std::cout << unfull_cnt << " " << added_cnt << " " << size_ <<std::endl;
+        
+        // 统计未分配节点数
         tmp_cnt_ = size_ - added_cnt;
         for( auto &page : p2id_) {
             if( page.size() < page_capacity) {
@@ -257,10 +291,12 @@ public:
             }
         }
 
+        // 处理未分配的节点
         if( !post) {
-            get_unassigned( vis, page_capacity);
+            get_unassigned( vis, page_capacity);  // 收集未分配节点
         }
         else {
+            // 将未分配节点填充到未满的页面中
             unsigned pid = 0;
             for( unsigned i = 0; i < size_; i++) {
                 if( !vis[i]) {
@@ -274,32 +310,37 @@ public:
     }
 
 
+    // 收集未分配的节点和在未满页面中的节点
     void get_unassigned( std::vector<bool> &vis, unsigned page_capacity) {
         unassigned_.reserve( tmp_cnt_);
         for( unsigned i = 0; i < size_; i++) {
+            // 未分配的节点 或 所在页面未满的节点
             if( !vis[i] || p2id_[id2p_[i]].size() < page_capacity) {
-                unassigned_.push_back( ori_ids_[i]);
+                unassigned_.push_back( ori_ids_[i]);  // 保存原始ID
             }
         }
         assert( unassigned_.size() == tmp_cnt_);
     }
     
 
-    unsigned size_;
-    std::vector<unsigned> ori_ids_;
-    std::vector<std::vector<unsigned>> undir_graph_;
-    std::vector<std::vector<float>> undir_weight_;
-    std::vector<unsigned> id2p_;
-    std::vector<std::vector<unsigned>> p2id_;
-    unsigned tmp_cnt_;
-    std::vector<unsigned> unassigned_;
+    // 成员变量
+    unsigned size_;                                // 簇中节点数量
+    std::vector<unsigned> ori_ids_;                // 节点的原始ID
+    std::vector<std::vector<unsigned>> undir_graph_;  // 无向图的邻接表
+    std::vector<std::vector<float>> undir_weight_;    // 边权重
+    std::vector<unsigned> id2p_;                   // 节点到页面的映射
+    std::vector<std::vector<unsigned>> p2id_;      // 页面到节点列表的映射
+    unsigned tmp_cnt_;                             // 临时计数（未分配节点数）
+    std::vector<unsigned> unassigned_;             // 未分配节点列表
 };
 
 
+// 最小割图分区类
 class mincut {
 
 public:
 
+    // 从磁盘索引文件加载元数据（节点数、页面容量等）
     void load_meta_data( std::string &disk_path) {
         std::ifstream meta_reader( disk_path, std::ios::binary);
         int meta_n, meta_dim;
@@ -308,14 +349,15 @@ public:
         meta_reader.read((char*) &meta_dim, sizeof(int));
         meta_data.resize( meta_n);
         meta_reader.read((char*) meta_data.data(), meta_n * sizeof(uint64_t));
-        this->npts_ = (unsigned) meta_data[0];
-        this->page_capacity_ = (unsigned) meta_data[4];
+        this->npts_ = (unsigned) meta_data[0];           // 总节点数
+        this->page_capacity_ = (unsigned) meta_data[4];  // 每页容量
         this->n_pages_ = (unsigned) DIV_ROUND_UP( this->npts_, this->page_capacity_);
         std::cout << "npts: " << this->npts_ << ", #nodes per page: " 
         << this->page_capacity_ << ", #pages: " << this->n_pages_ << std::endl;
         meta_reader.close();
     }
 
+    // 加载索引图结构（邻接表和边权重）
     void load_index_graph( std::string &index_path) {
         my_timer timer;
 
@@ -324,6 +366,7 @@ public:
         std::ifstream index_reader( index_path, std::ios::binary);
         std::ifstream weight_reader( index_path + ".weights", std::ios::binary);
 
+        // 读取图的元信息
         float max_weight;
         uint64_t npts, num_edges;
         unsigned max_degree;
@@ -341,6 +384,7 @@ public:
         offset = sizeof(uint64_t) + sizeof(unsigned);
         index_reader.seekg(offset, std::ios::cur);
 
+        // 读取每个节点的邻接表和边权重
         for( unsigned i = 0; i < this->npts_; i++) {
             unsigned degree_index;
             unsigned degree_weights;
@@ -359,22 +403,29 @@ public:
         timer.timing("Load index graph");
     }
 
+    // K-means聚类：将节点划分为n_clusters个簇
     void my_kmeans( std::string &base_path, uint32_t *labels,
                     size_t n_clusters, size_t max_k_means_reps = 12) {
         my_timer timer;
         size_t train_dim;
         size_t train_size;
         float *train_data;
+        
+        // 采样25600个点用于K-means训练
         double p_val = ((double) 25600UL / (double) this->npts_);
         gen_random_slice<float>(base_path, p_val, train_data, train_size, train_dim);
+        
+        // K-means++初始化中心点
         float *centroids = new float[n_clusters * train_dim];
         kmeans::kmeanspp_selecting_pivots(train_data, train_size, train_dim,
                                           centroids, n_clusters);
+        // Lloyd算法迭代优化
         kmeans::run_lloyds(train_data, train_size, train_dim, centroids,
                            n_clusters, max_k_means_reps, NULL, NULL);
         delete [] train_data;
         timer.timing("Cluster");
 
+        // 加载所有基础向量
         timer.reset();
         std::ifstream base_reader( base_path, std::ios::binary);
         base_reader.seekg( 2 * sizeof(int), std::ios::beg);
@@ -382,6 +433,7 @@ public:
         base_reader.read((char*) base_vectors, this->npts_ * train_dim * sizeof(float));
         timer.timing("Load base vectors");
 
+        // 为每个向量分配最近的簇标签
         timer.reset();
         math_utils::compute_closest_centers(base_vectors, this->npts_, train_dim, 
                                             centroids, n_clusters, 1, labels);
@@ -389,29 +441,38 @@ public:
         timer.timing("Get labels");
     }
 
+    // 合并未分配节点到一个后处理簇中
     void merge_unassigned( cluster **clusters, unsigned n_cluster, 
                            std::vector<unsigned> &ivf, uint32_t *labels) {
+        // 统计所有簇中未分配的节点总数
         unsigned cnt = 0;
         for( unsigned i = 0; i < n_cluster; i++) {
             cnt += clusters[i]->tmp_cnt_;
         }
         std::cout << cnt << std::endl;
+        
+        // 合并所有未分配节点到一个列表
         ivf.reserve( cnt);
         for( unsigned i = 0; i < n_cluster; i++) {
             ivf.insert( ivf.end(),
                         std::make_move_iterator( clusters[i]->unassigned_.begin()),
                         std::make_move_iterator( clusters[i]->unassigned_.end()));
         }
+        
+        // 为所有未分配节点赋予新的簇标签（n_cluster）
         #pragma omp parallel for
         for( unsigned i = 0; i < cnt; i++) {
             labels[ivf[i]] = n_cluster;
         }
     }
 
+    // 连接一个簇的所有页面到全局页面列表
     void concat_one_cluster( cluster *cur_cluster, unsigned &page_id, bool post=false) {
-        unsigned theta = post ? 1 : this->page_capacity_;
+        unsigned theta = post ? 1 : this->page_capacity_;  // 后处理簇容许不满的页面
         std::vector<std::vector<unsigned>> &cur_p2id = cur_cluster->p2id_;
         std::vector<unsigned> &cur_ori_ids = cur_cluster->ori_ids_;
+        
+        // 只添加满足容量阈值的页面
         for( auto &page : cur_p2id) {
             if( page.size() >= theta) {
                 for( auto &local_id : page) {
@@ -422,15 +483,22 @@ public:
         }
     }
 
+    // 连接所有簇的页面，构建全局页面布局
     void concatenate_pages( cluster **clusters, cluster *post_cluster, unsigned n_cluster) {
         this->p2id_.resize( this->n_pages_);
         unsigned page_id = 0;
+        
+        // 先添加所有正常簇的页面
         for( unsigned i = 0; i < n_cluster; i++) {
             concat_one_cluster( clusters[i], page_id);
         }
+        
+        // 添加后处理簇的页面（包含未分配节点）
         concat_one_cluster( post_cluster, page_id, true);
         std::cout << page_id << std::endl;
         assert( page_id == this->n_pages_);
+        
+        // 构建节点到页面的反向映射
         this->id2p_.resize( this->npts_);
         #pragma omp parallel for
         for( unsigned i = 0; i < this->n_pages_; i++) {
@@ -440,12 +508,16 @@ public:
         }
     }
 
+    // 主分区函数：执行完整的图分区流程
     void partition( std::string &base_path, size_t n_clusters) {
+        // 1. K-means聚类，将节点划分为n_clusters个簇
         uint32_t *labels;
         labels = new uint32_t [this->npts_];
         my_kmeans( base_path, labels, n_clusters);
 
         my_timer timer;
+        
+        // 2. 构建簇的倒排索引（每个簇包含哪些节点）
         std::vector<std::vector<unsigned>> cluster_ivf( n_clusters);
         std::vector<std::mutex> cluster_locks( n_clusters);
         #pragma omp parallel for
@@ -456,22 +528,28 @@ public:
         }
         timer.timing("Get cluster ivf");
 
+        // 3. 为每个簇创建cluster对象，并执行簇内贪心布局
         timer.reset();
         cluster **clusters = new cluster *[n_clusters];
         unsigned *id_in_cluster = new unsigned [this->npts_];
         for( unsigned i = 0; i < n_clusters; i++) {
             cluster *cur_cluster = new cluster( cluster_ivf[i], id_in_cluster);
+            // 提取簇内的子图
             cur_cluster->get_direct_graph( this->index_graph_, this->index_weight_, 
                                            labels, id_in_cluster);
+            // 转换为无向图
             cur_cluster->trans2undirect();
             clusters[i] = cur_cluster;
         }
+        
+        // 并行执行每个簇的贪心布局
         #pragma omp parallel for
         for( unsigned i = 0; i < n_clusters; i++) {
             clusters[i]->greedy_layout( this->page_capacity_);
         }
         timer.timing("Init clusters");
 
+        // 4. 合并所有簇中未分配的节点，形成后处理簇
         timer.reset();
         std::vector<unsigned> tmp_ivf;
         merge_unassigned( clusters, n_clusters, tmp_ivf, labels);
