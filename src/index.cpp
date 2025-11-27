@@ -820,12 +820,21 @@ namespace diskann {
    * in the graph.
    */
   template<typename T, typename TagT>
+  /**
+   * @brief 计算图的入口点
+   * 
+   * 通过计算数据的中心点（质心），找到距离质心最近的数据点作为图的入口点（medoid）。
+   * 该入口点用于后续的图搜索和导航。
+   * 
+   * @return unsigned 返回距离质心最近的数据点的索引
+   */
   unsigned Index<T, TagT>::calculate_entry_point() {
-    // allocate and init centroid
+    // 分配并初始化质心数组
     float *center = new float[_aligned_dim]();
     for (size_t j = 0; j < _aligned_dim; j++)
       center[j] = 0;
 
+    // 计算所有数据点的质心
     for (size_t i = 0; i < _nd; i++)
       for (size_t j = 0; j < _aligned_dim; j++)
         center[j] += (float) _data[i * _aligned_dim + j];
@@ -833,11 +842,11 @@ namespace diskann {
     for (size_t j = 0; j < _aligned_dim; j++)
       center[j] /= (float) _nd;
 
-    // compute all to one distance
+    // 计算所有数据点到质心的距离
     float *distances = new float[_nd]();
 #pragma omp parallel for schedule(static, 65536)
     for (_s64 i = 0; i < (_s64) _nd; i++) {
-      // extract point and distance reference
+      // 提取当前点和距离引用
       float &  dist = distances[i];
       const T *cur_vec = _data + (i * (size_t) _aligned_dim);
       dist = 0;
@@ -848,7 +857,7 @@ namespace diskann {
         dist += diff;
       }
     }
-    // find imin
+    // 找到距离最小的点的索引
     unsigned min_idx = 0;
     float    min_dist = distances[0];
     for (unsigned i = 1; i < _nd; i++) {
@@ -863,6 +872,33 @@ namespace diskann {
     return min_idx;
   }
 
+  /**
+   * @brief 贪心搜索迭代到局部最优点
+   * 
+   * 实现类似HNSW的贪心最佳优先搜索（Greedy Best-First Search）：
+   * 从初始点集开始，不断扩展到距离目标更近的邻居节点，直到找不到更近的点为止。
+   * 维护一个大小为Lsize的候选池，每次选择未访问且距离最近的节点进行扩展。
+   * 
+   * 算法流程：
+   * 1. 初始化候选池best_L_nodes，将初始点加入并按距离排序
+   * 2. 从候选池中取出距离最近且未扩展的节点n
+   * 3. 获取节点n的所有邻居，计算它们到目标的距离
+   * 4. 将更近的邻居插入候选池，保持池大小为Lsize
+   * 5. 重复步骤2-4，直到候选池中所有节点都已扩展
+   * 
+   * @param node_coords 目标节点的坐标数据
+   * @param Lsize 候选池大小（保留最近的L个候选节点）
+   * @param init_ids 初始搜索点ID列表（通常包含入口点）
+   * @param expanded_nodes_info 输出：已扩展节点的详细信息（ID+距离）
+   * @param expanded_nodes_ids 输出：已扩展节点的ID集合
+   * @param best_L_nodes 候选池：当前最优的L个节点（按距离排序）
+   * @param des 临时数组：当前节点的邻居列表
+   * @param inserted_into_pool_rs 已插入候选池的节点集合（哈希表实现）
+   * @param inserted_into_pool_bs 已插入候选池的节点集合（位图实现，适用于小规模数据）
+   * @param ret_frozen 是否返回冻结点（默认true）
+   * @param search_invocation 是否为搜索调用（false表示构建调用，默认false）
+   * @return std::pair<uint32_t, uint32_t> 返回(跳数, 距离计算次数)
+   */
   template<typename T, typename TagT>
   std::pair<uint32_t, uint32_t> Index<T, TagT>::iterate_to_fixed_point(
       const T *node_coords, const unsigned Lsize,
@@ -873,6 +909,7 @@ namespace diskann {
       tsl::robin_set<unsigned> &inserted_into_pool_rs,
       boost::dynamic_bitset<> &inserted_into_pool_bs, bool ret_frozen,
       bool search_invocation) {
+    // 初始化候选池，所有节点距离设为最大值
     for (unsigned i = 0; i < Lsize + 1; i++) {
       best_L_nodes[i].distance = std::numeric_limits<float>::max();
     }
@@ -882,16 +919,18 @@ namespace diskann {
       des.clear();
     }
 
-    unsigned l = 0;
+    unsigned l = 0;  // 候选池当前大小
     Neighbor nn;
 
+    // 选择使用位图还是哈希表来追踪已访问节点
+    // 小规模数据使用位图更快
     bool fast_iterate =
         (_max_points + _num_frozen_pts) <= MAX_POINTS_FOR_USING_BITSET;
 
     if (fast_iterate) {
       auto total_num_points = _max_points + _num_frozen_pts;
       if (inserted_into_pool_bs.size() < total_num_points) {
-        // hopefully using 2X will reduce the number of allocations.
+        // 使用2倍大小减少重新分配次数
         auto resize_size = 2 * total_num_points > MAX_POINTS_FOR_USING_BITSET
                                ? MAX_POINTS_FOR_USING_BITSET
                                : 2 * total_num_points;
@@ -899,6 +938,7 @@ namespace diskann {
       }
     }
 
+    // 将初始点加入候选池
     for (auto id : init_ids) {
       if (id >= _max_points + _num_frozen_pts) {
         diskann::cerr << "Out of range loc found as an edge : " << id
@@ -926,18 +966,20 @@ namespace diskann {
         break;
     }
 
-    // sort best_L_nodes based on distance of each point to node_coords
+    // 按距离排序候选池
     std::sort(best_L_nodes.begin(), best_L_nodes.begin() + l);
-    unsigned k = 0;
-    uint32_t hops = 0;
-    uint32_t cmps = 0;
+    unsigned k = 0;     // 当前处理的候选节点索引
+    uint32_t hops = 0;  // 跳数统计
+    uint32_t cmps = 0;  // 距离计算次数统计
 
+    // 主循环：不断扩展最近的未访问节点
     while (k < l) {
       unsigned nk = l;
 
-      if (best_L_nodes[k].flag) {
-        best_L_nodes[k].flag = false;
+      if (best_L_nodes[k].flag) {  // flag=true表示未扩展
+        best_L_nodes[k].flag = false;  // 标记为已扩展
         auto n = best_L_nodes[k].id;
+        // 记录扩展节点（跳过冻结点，除非ret_frozen=true）
         if (!(best_L_nodes[k].id == _start && _num_frozen_pts > 0 &&
               !ret_frozen)) {
           if (!search_invocation) {
@@ -945,6 +987,7 @@ namespace diskann {
             expanded_nodes_ids.insert(n);
           }
         }
+        // 获取节点n的邻居列表
         des.clear();
         if (_dynamic_index) {
           LockGuard guard(_locks[n]);
@@ -971,17 +1014,20 @@ namespace diskann {
           }
         }
 
+        // 遍历所有邻居，尝试将更近的邻居加入候选池
         for (unsigned m = 0; m < des.size(); ++m) {
           unsigned id = des[m];
           bool     id_is_missing = fast_iterate ? inserted_into_pool_bs[id] == 0
                                             : inserted_into_pool_rs.find(id) ==
                                                   inserted_into_pool_rs.end();
-          if (id_is_missing) {
+          if (id_is_missing) {  // 如果邻居节点尚未访问
+            // 标记为已访问
             if (fast_iterate) {
               inserted_into_pool_bs[id] = 1;
             } else {
               inserted_into_pool_rs.insert(id);
             }
+            // 预取下一个节点数据到缓存（优化性能）
             if ((m + 1) < des.size()) {
               auto nextn = des[m + 1];
               diskann::prefetch_vector(
@@ -990,22 +1036,27 @@ namespace diskann {
             }
 
             cmps++;
+            // 计算邻居到目标的距离
             float dist = _distance->compare(node_coords,
                                             _data + _aligned_dim * (size_t) id,
                                             (unsigned) _aligned_dim);
 
+            // 剪枝：如果距离大于等于候选池中最远的点，且池已满，则跳过
             if (dist >= best_L_nodes[l - 1].distance && (l == Lsize))
               continue;
 
+            // 将邻居插入候选池，保持有序
             Neighbor nn(id, dist, true);
             unsigned r = InsertIntoPool(best_L_nodes.data(), l, nn);
             if (l < Lsize)
               ++l;
+            // 如果插入位置在当前k之前，更新nk以便回退
             if (r < nk)
               nk = r;
           }
         }
 
+        // 更新k：如果有更近的点插入到k之前，回退到插入位置；否则继续前进
         if (nk <= k)
           k = nk;
         else
@@ -1016,6 +1067,23 @@ namespace diskann {
     return std::make_pair(hops, cmps);
   }
 
+  /**
+   * @brief 获取扩展节点（候选邻居搜索）
+   * 
+   * 对指定节点执行贪心搜索，找到Lindex个候选邻居节点。
+   * 这是图构建过程中的核心操作：为每个节点搜索潜在的邻居候选。
+   * 内部调用iterate_to_fixed_point实现贪心搜索。
+   * 
+   * @param node_id 目标节点ID
+   * @param Lindex 搜索候选池大小（搜索L个最近邻候选）
+   * @param init_ids 初始搜索点列表（为空则使用_start作为起点）
+   * @param expanded_nodes_info 输出：搜索过程中扩展的所有节点信息
+   * @param expanded_nodes_ids 输出：扩展节点的ID集合
+   * @param des 临时数组：存储邻居列表
+   * @param best_L_nodes 候选池数组
+   * @param inserted_into_pool_rs 已访问节点集合（哈希表）
+   * @param inserted_into_pool_bs 已访问节点集合（位图）
+   */
   template<typename T, typename TagT>
   void Index<T, TagT>::get_expanded_nodes(
       const size_t node_id, const unsigned Lindex,
@@ -1035,6 +1103,17 @@ namespace diskann {
                            inserted_into_pool_rs, inserted_into_pool_bs);
   }
 
+  /**
+   * @brief 获取扩展节点（简化版本）
+   * 
+   * get_expanded_nodes的重载版本，自动创建内部所需的临时数据结构。
+   * 
+   * @param node_id 目标节点ID
+   * @param Lindex 搜索候选池大小
+   * @param init_ids 初始搜索点列表
+   * @param expanded_nodes_info 输出：扩展节点信息
+   * @param expanded_nodes_ids 输出：扩展节点ID集合
+   */
   template<typename T, typename TagT>
   void Index<T, TagT>::get_expanded_nodes(
       const size_t node_id, const unsigned Lindex,
@@ -1989,15 +2068,28 @@ namespace diskann {
    *************************************************/
 
   template<typename T, typename TagT>
+  /**
+   * @brief 生成冻结点
+   * 
+   * 冻结点是图的固定入口点，用于搜索时的起始位置。
+   * 如果没有冻结点则返回，否则通过计算入口点并复制数据生成冻结点。
+   * 
+   * @return int 返回0表示成功，返回1表示数据维度为0
+   */
   int Index<T, TagT>::generate_frozen_point() {
+    // 如果没有冻结点，直接返回
+	// _num_frozen_pts 当且仅当 dynamic_index 置位时为 1，否则为 0
     if (_num_frozen_pts == 0)
       return 0;
 
+    // 如果数据维度为0，将冻结点位置的数据清零
     if (_nd == 0) {
       memset(_data + (_max_points) *_aligned_dim, 0, _aligned_dim * sizeof(T));
       return 1;
     }
+    // 计算图的入口点
     size_t res = calculate_entry_point();
+    // 将入口点的数据复制到冻结点位置
     memcpy(_data + _max_points * _aligned_dim, _data + res * _aligned_dim,
            _aligned_dim * sizeof(T));
     return 0;

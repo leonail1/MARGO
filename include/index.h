@@ -263,9 +263,24 @@ namespace diskann {
 
     // generates 1 frozen point that will never be deleted from the graph
     // This is not visible to the user
+    /**
+     * @brief 生成冻结点
+     * 
+     * 冻结点是图的固定入口点，用于搜索时的起始位置。
+     * 如果没有冻结点则返回，否则通过计算入口点并复制数据生成冻结点。
+     * 
+     * @return int 返回0表示成功，返回1表示数据维度为0
+     */
     int generate_frozen_point();
 
-    // determines navigating node of the graph by calculating medoid of data
+    /**
+     * @brief 计算图的入口点
+     * 
+     * 通过计算数据的中心点（质心），找到距离质心最近的数据点作为图的入口点（medoid）。
+     * 该入口点用于后续的图搜索和导航。
+     * 
+     * @return unsigned 返回距离质心最近的数据点的索引
+     */
     unsigned calculate_entry_point();
 
     // called only when _eager_delete is to be supported
@@ -277,6 +292,26 @@ namespace diskann {
                                               float *               distances,
                                               InMemQueryScratch<T> &scratch);
 
+    /**
+     * @brief 贪心搜索迭代到局部最优点
+     * 
+     * 实现类似HNSW的贪心最佳优先搜索（Greedy Best-First Search）：
+     * 从初始点集开始，不断扩展到距离目标更近的邻居节点，直到找不到更近的点为止。
+     * 维护一个大小为Lsize的候选池，每次选择未访问且距离最近的节点进行扩展。
+     * 
+     * @param node_coords 目标节点的坐标数据
+     * @param Lsize 候选池大小（保留最近的L个候选节点）
+     * @param init_ids 初始搜索点ID列表（通常包含入口点）
+     * @param expanded_nodes_info 输出：已扩展节点的详细信息（ID+距离）
+     * @param expanded_nodes_ids 输出：已扩展节点的ID集合
+     * @param best_L_nodes 候选池：当前最优的L个节点（按距离排序）
+     * @param des 临时数组：当前节点的邻居列表
+     * @param inserted_into_pool_rs 已插入候选池的节点集合（哈希表实现）
+     * @param inserted_into_pool_bs 已插入候选池的节点集合（位图实现，适用于小规模数据）
+     * @param ret_frozen 是否返回冻结点（默认true）
+     * @param search_invocation 是否为搜索调用（false表示构建调用，默认false）
+     * @return std::pair<uint32_t, uint32_t> 返回(跳数, 距离计算次数)
+     */
     std::pair<uint32_t, uint32_t> iterate_to_fixed_point(
         const T *node_coords, const unsigned Lindex,
         const std::vector<unsigned> &init_ids,
@@ -287,6 +322,20 @@ namespace diskann {
         boost::dynamic_bitset<> &inserted_into_pool_bs, bool ret_frozen = true,
         bool search_invocation = false);
 
+    /**
+     * @brief 获取扩展节点（候选邻居搜索）
+     * 
+     * 对指定节点执行贪心搜索，找到Lindex个候选邻居节点。
+     * 这是图构建过程中的核心操作：为每个节点搜索潜在的邻居候选。
+     * 内部调用iterate_to_fixed_point实现贪心搜索。
+     * 
+     * @param node 目标节点ID
+     * @param Lindex 搜索候选池大小（搜索L个最近邻候选）
+     * @param init_ids 初始搜索点列表（为空则使用_start作为起点）
+     * @param expanded_nodes_info 输出：搜索过程中扩展的所有节点信息
+     * @param expanded_nodes_ids 输出：扩展节点的ID集合
+     * @param des 临时数组：存储邻居列表
+     */
     void get_expanded_nodes(const size_t node, const unsigned Lindex,
                             std::vector<unsigned>     init_ids,
                             std::vector<Neighbor> &   expanded_nodes_info,
@@ -298,6 +347,17 @@ namespace diskann {
 
     // get_expanded_nodes for insertion. Must investigate to see if perf can
     // be improved here as well using the same technique as above.
+    /**
+     * @brief 获取扩展节点（简化版本）
+     * 
+     * get_expanded_nodes的重载版本，自动创建内部所需的临时数据结构。
+     * 
+     * @param node_id 目标节点ID
+     * @param Lindex 搜索候选池大小
+     * @param init_ids 初始搜索点列表
+     * @param expanded_nodes_info 输出：扩展节点信息
+     * @param expanded_nodes_ids 输出：扩展节点ID集合
+     */
     void get_expanded_nodes(const size_t node_id, const unsigned Lindex,
                             std::vector<unsigned>     init_ids,
                             std::vector<Neighbor> &   expanded_nodes_info,

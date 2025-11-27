@@ -830,11 +830,29 @@ namespace diskann {
     return bytes_written;
   }
 
+  /**
+   * @brief 从二进制文件复制对齐后的向量数据到内存
+   * 
+   * 该函数读取DiskANN格式的二进制向量文件，并将数据复制到预分配的内存中。
+   * 文件格式：[npts(int)][dim(int)][vector1][vector2]...[vectorN]
+   * 
+   * 对齐处理：
+   * - 如果 dim < rounded_dim，则在每个向量末尾填充0
+   * - 对齐可以提高SIMD指令的性能（如SSE、AVX）
+   * 
+   * @param bin_file 二进制文件路径
+   * @param data 预分配的数据指针（不能为nullptr）
+   * @param npts 输出参数：文件中的向量数量
+   * @param dim 输出参数：向量维度
+   * @param rounded_dim 对齐后的维度（通常向上取整到8或16的倍数）
+   * @param offset 文件读取偏移量（默认为0）
+   */
   template<typename T>
   inline void copy_aligned_data_from_file(const char* bin_file, T*& data,
                                           size_t& npts, size_t& dim,
                                           const size_t& rounded_dim,
                                           size_t        offset = 0) {
+    // 检查数据指针是否已分配
     if (data == nullptr) {
       diskann::cerr << "Memory was not allocated for " << data
                     << " before calling the load function. Exiting..."
@@ -848,14 +866,18 @@ namespace diskann {
     reader.open(bin_file, std::ios::binary);
     reader.seekg(offset, reader.beg);
 
+    // 读取文件头：点数和维度
     int npts_i32, dim_i32;
     reader.read((char*) &npts_i32, sizeof(int));
     reader.read((char*) &dim_i32, sizeof(int));
     npts = (unsigned) npts_i32;
     dim = (unsigned) dim_i32;
 
+    // 逐个向量读取并对齐
     for (size_t i = 0; i < npts; i++) {
+      // 读取原始维度的数据
       reader.read((char*) (data + i * rounded_dim), dim * sizeof(T));
+      // 在对齐维度的剩余部分填充0（用于SIMD优化）
       memset(data + i * rounded_dim + dim, 0, (rounded_dim - dim) * sizeof(T));
     }
   }

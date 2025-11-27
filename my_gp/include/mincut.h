@@ -121,6 +121,9 @@ public:
         }
 
         // 合并正向边和反向边，形成无向图
+		// 就是对每个节点i的所有入边添加（如果没有）对应的出边，确保每两个节点之间都有双向边
+		// 如果已经存在双向边，则两条边的权重都更新为原来两条边的权重之和
+		// 否则，新添加的出边权重设置为入边权重值
         #pragma omp parallel for
         for( unsigned i = 0; i < size_; i++) {
             unsigned degree = in_graph[i].size();
@@ -534,13 +537,13 @@ public:
         unsigned *id_in_cluster = new unsigned [this->npts_];
         for( unsigned i = 0; i < n_clusters; i++) {
             cluster *cur_cluster = new cluster( cluster_ivf[i], id_in_cluster);
-            // 提取簇内的子图
+            // 提取该簇的有向子图（只保留簇内边）
             cur_cluster->get_direct_graph( this->index_graph_, this->index_weight_, 
                                            labels, id_in_cluster);
             // 转换为无向图
             cur_cluster->trans2undirect();
             clusters[i] = cur_cluster;
-        }
+        } 
         
         // 并行执行每个簇的贪心布局
         #pragma omp parallel for

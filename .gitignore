@@ -1,2 +1,5 @@
 release/
+debug/
 index/
+indices/
+graph_partition/
