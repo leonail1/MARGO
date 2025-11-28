@@ -64,37 +64,58 @@ namespace diskann {
     std::vector<SimpleNeighbor> pool;
   };
 
+  /**
+   * @brief 将新邻居插入到有序候选池中
+   * 
+   * 使用二分查找定位插入位置，然后通过memmove移动元素来保持数组有序。
+   * 如果新节点的ID已存在于池中，则拒绝插入（返回K+1）。
+   * 
+   * @param addr 候选池数组指针
+   * @param K 当前候选池大小
+   * @param nn 待插入的新邻居
+   * @return 插入位置索引；如果节点已存在则返回K+1
+   */
   static inline unsigned InsertIntoPool(Neighbor *addr, unsigned K,
                                         Neighbor nn) {
-    // find the location to insert
+    // 二分查找插入位置
     unsigned left = 0, right = K - 1;
+    
+    // 快速路径：新节点距离最小，插入到最前面
     if (addr[left].distance > nn.distance) {
       memmove((char *) &addr[left + 1], &addr[left], K * sizeof(Neighbor));
       addr[left] = nn;
       return left;
     }
+    
+    // 快速路径：新节点距离最大，插入到最后
     if (addr[right].distance < nn.distance) {
       addr[K] = nn;
       return K;
     }
+    
+    // 二分查找定位插入区间 [left, right]
     while (right > 1 && left < right - 1) {
       unsigned mid = (left + right) / 2;
       if (addr[mid].distance > nn.distance)
-        right = mid;
+        right = mid;  // 插入位置在左半部分
       else
-        left = mid;
+        left = mid;   // 插入位置在右半部分
     }
-    // check equal ID
 
+    // 去重检查：从left向左扫描距离相同的节点，检查ID是否重复
     while (left > 0) {
       if (addr[left].distance < nn.distance)
         break;
       if (addr[left].id == nn.id)
-        return K + 1;
+        return K + 1;  // 节点已存在，拒绝插入
       left--;
     }
+    
+    // 检查边界节点是否重复
     if (addr[left].id == nn.id || addr[right].id == nn.id)
       return K + 1;
+    
+    // 在right位置插入，将right及其后续元素右移
     memmove((char *) &addr[right + 1], &addr[right],
             (K - right) * sizeof(Neighbor));
     addr[right] = nn;
